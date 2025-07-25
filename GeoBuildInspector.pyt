@@ -1,375 +1,391 @@
 import arcpy
+import sys
 import os
+from datetime import datetime
 
-class ConstructionAnalysisTool:
-    """
-    ArcGIS Pro Geoprocessing Tool for Construction Analysis
-    Analyzes parcels, zoning, and detected constructions to identify legal/illegal buildings
-    """
+# Define input parameters
+Parcels_Name = arcpy.GetParameterAsText(0)  # Input Parcels Feature Class
+Zoning_Layer = arcpy.GetParameterAsText(1)  # Input Zoning Feature Class
+Detected_Constructions = arcpy.GetParameterAsText(2)  # Input Detected Constructions Feature Class
+BPMIS_Data = arcpy.GetParameterAsText(3)  # Input BPMIS Table/Feature Class
+Output_Geodatabase = arcpy.GetParameterAsText(4)  # Output Geodatabase
+Image_Acquisition_Date = arcpy.GetParameterAsText(5)  # Image acquisition date (text)
+
+# Validate image acquisition date format (optional but recommended)
+def validate_date_format(date_string):
+    """Validate date format and return standardized format"""
+    try:
+        if not date_string.strip():
+            return datetime.now().strftime("%Y-%m-%d")
+        
+        # Try different date formats
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%Y%m%d"):
+            try:
+                parsed_date = datetime.strptime(date_string.strip(), fmt)
+                return parsed_date.strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        
+        # If no format matches, return as-is with warning
+        arcpy.AddWarning(f"Date format not recognized: {date_string}. Using as provided.")
+        return date_string.strip()
+    except:
+        return datetime.now().strftime("%Y-%m-%d")
+
+# Validate and format the acquisition date
+acquisition_date = validate_date_format(Image_Acquisition_Date)
+
+# Define output variables with dynamic naming
+year_suffix = acquisition_date.replace("-", "_")
+ParcelZoning = os.path.join(Output_Geodatabase, "ParcelZoning_Temp")
+ParcelZoning_Final = os.path.join(Output_Geodatabase, f"ParcelZoning_Final_{year_suffix}")
+New_Constructions = os.path.join(Output_Geodatabase, f"New_Constructions_{year_suffix}")
+Parcel_Zoning_Statistics = os.path.join(Output_Geodatabase, "ParcelZoning_Statistics_Temp")
+Construction_Statistics = os.path.join(Output_Geodatabase, "Construction_Statistics_Temp")
+New_Houses = os.path.join(Output_Geodatabase, f"New_Houses_{year_suffix}")
+
+def cleanup_temp_data():
+    """Clean up temporary datasets"""
+    temp_datasets = [
+        ParcelZoning,
+        Parcel_Zoning_Statistics,
+        Construction_Statistics,
+        "ParcelZoning_Layer",
+        "New_Constructions_Layer",
+        "New_Houses_Layer"
+    ]
     
-    def __init__(self):
-        self.label = "Construction Analysis Tool"
-        self.description = "Analyzes parcels, zoning, and detected constructions to identify legal/illegal buildings"
-        self.category = "Construction Analysis"
-        self.canRunInBackground = True
-        
-    def getParameterInfo(self):
-        """Define the tool parameters"""
-        
-        # Parameter 0: Parcels Layer
-        param0 = arcpy.Parameter(
-            displayName="Parcels Layer",
-            name="parcels_layer",
-            datatype="GPFeatureLayer",
-            parameterType="Required",
-            direction="Input"
-        )
-        param0.filter.list = ["Polygon"]
-        
-        # Parameter 1: Zoning Layer
-        param1 = arcpy.Parameter(
-            displayName="Zoning Layer",
-            name="zoning_layer",
-            datatype="GPFeatureLayer",
-            parameterType="Required",
-            direction="Input"
-        )
-        param1.filter.list = ["Polygon"]
-        
-        # Parameter 2: Detected Constructions
-        param2 = arcpy.Parameter(
-            displayName="Detected Constructions",
-            name="detected_constructions",
-            datatype="GPFeatureLayer",
-            parameterType="Required",
-            direction="Input"
-        )
-        param2.filter.list = ["Polygon"]
-        
-        # Parameter 3: BPMIS Data
-        param3 = arcpy.Parameter(
-            displayName="BPMIS Data",
-            name="bpmis_data",
-            datatype="GPTableView",
-            parameterType="Required",
-            direction="Input"
-        )
-        
-        # Parameter 4: Output Geodatabase
-        param4 = arcpy.Parameter(
-            displayName="Output Geodatabase",
-            name="output_geodatabase",
-            datatype="DEWorkspace",
-            parameterType="Required",
-            direction="Input"
-        )
-        param4.filter.list = ["Local Database"]
-        
-        # Parameter 5: Analysis Year
-        param5 = arcpy.Parameter(
-            displayName="Analysis Year",
-            name="analysis_year",
-            datatype="GPLong",
-            parameterType="Required",
-            direction="Input"
-        )
-        param5.value = 2025
-        
-        # Parameter 6: Final Output Name
-        param6 = arcpy.Parameter(
-            displayName="Final Output Name",
-            name="final_output_name",
-            datatype="GPString",
-            parameterType="Required",
-            direction="Input"
-        )
-        param6.value = "CoK_Constructions"
-        
-        # Parameter 7: Output Feature Class (derived)
-        param7 = arcpy.Parameter(
-            displayName="Output Feature Class",
-            name="output_feature_class",
-            datatype="DEFeatureClass",
-            parameterType="Derived",
-            direction="Output"
-        )
-        
-        return [param0, param1, param2, param3, param4, param5, param6, param7]
-    
-    def isLicensed(self):
-        """Set whether tool is licensed to execute"""
-        return True
-    
-    def updateParameters(self, parameters):
-        """Modify the values and properties of parameters before internal validation"""
-        # Update the derived output parameter
-        if parameters[4].altered and parameters[6].altered:
-            if parameters[4].valueAsText and parameters[6].valueAsText:
-                output_gdb = parameters[4].valueAsText
-                output_name = parameters[6].valueAsText
-                parameters[7].value = os.path.join(output_gdb, output_name)
-        return
-    
-    def updateMessages(self, parameters):
-        """Modify the messages created by internal validation"""
-        # Validate output name
-        if parameters[6].value:
-            output_name = parameters[6].valueAsText
-            if not output_name.replace("_", "").isalnum():
-                parameters[6].setErrorMessage("Output name must contain only letters, numbers, and underscores")
-        return
-    
-    def execute(self, parameters, messages):
-        """Execute the tool"""
+    for dataset in temp_datasets:
         try:
-            # Get input parameters
-            parcels_layer = parameters[0].valueAsText
-            zoning_layer = parameters[1].valueAsText
-            detected_constructions = parameters[2].valueAsText
-            bpmis_data = parameters[3].valueAsText
-            output_geodatabase = parameters[4].valueAsText
-            analysis_year = parameters[5].value
-            final_output_name = parameters[6].valueAsText
-            
-            # Define intermediate output variables
-            parcel_zoning = os.path.join(output_geodatabase, "ParcelZoning")
-            parcel_zoning_final = os.path.join(output_geodatabase, "ParcelZoning_Final")
-            new_constructions = os.path.join(output_geodatabase, f"New_Constructions_{analysis_year}")
-            parcel_zoning_statistics = os.path.join(output_geodatabase, "ParcelZoning_Statistics")
-            summary_houses = os.path.join(output_geodatabase, "Summary_Houses")
-            final_output = os.path.join(output_geodatabase, final_output_name)
-            
-            # Set derived output parameter
-            parameters[7].value = final_output
-            
-            arcpy.AddMessage(f"Starting Construction Analysis for year {analysis_year}")
-            arcpy.AddMessage(f"Final output will be saved as: {final_output}")
-            
-            ##############################################################################
-            # PART A: Process Parcels & Zoning to create filtered parcels
-            ##############################################################################
-            arcpy.AddMessage("=" * 60)
-            arcpy.AddMessage("PART A: Processing Parcels and Zoning")
-            arcpy.AddMessage("=" * 60)
-            
-            arcpy.AddMessage("Starting intersection between Parcels and Zoning...")
-            arcpy.analysis.Intersect(
-                in_features=[parcels_layer, zoning_layer],
-                out_feature_class=parcel_zoning,
-                join_attributes="ALL"
-            )
-            arcpy.AddMessage("✓ Intersection completed successfully.")
-            
-            arcpy.AddMessage("Calculating summary statistics on ParcelZoning...")
-            arcpy.analysis.Statistics(
-                in_table=parcel_zoning,
-                out_table=parcel_zoning_statistics,
-                statistics_fields="Shape_Area MAX",
-                case_field="FID_Parcels"
-            )
-            arcpy.AddMessage("✓ Summary statistics calculation completed.")
-            
-            arcpy.AddMessage("Joining summary table with ParcelZoning...")
-            arcpy.management.JoinField(
-                in_data=parcel_zoning,
-                in_field="FID_Parcels",
-                join_table=parcel_zoning_statistics,
-                join_field="FID_Parcels",
-                fields="MAX_Shape_Area"
-            )
-            arcpy.AddMessage("✓ Join operation completed.")
-            
-            arcpy.AddMessage("Selecting parcels where Shape_Area >= MAX_Shape_Area...")
-            arcpy.management.MakeFeatureLayer(parcel_zoning, "ParcelZoning_Layer")
-            oid_field = arcpy.Describe("ParcelZoning_Layer").OIDFieldName
-            selected_oids = []
-            
-            with arcpy.da.SearchCursor("ParcelZoning_Layer", [oid_field, "Shape_Area", "MAX_Shape_Area"]) as cursor:
-                for oid, shape_area, max_shape_area in cursor:
-                    if shape_area >= max_shape_area:
-                        selected_oids.append(oid)
-            
-            if selected_oids:
-                oid_list_str = ",".join(map(str, selected_oids))
-                query = f"{oid_field} IN ({oid_list_str})"
-                arcpy.management.SelectLayerByAttribute("ParcelZoning_Layer", "NEW_SELECTION", query)
-                selected_count = int(arcpy.management.GetCount("ParcelZoning_Layer")[0])
-                arcpy.AddMessage(f"✓ Selected {selected_count} parcels with representative geometry.")
-                
-                arcpy.conversion.ExportFeatures("ParcelZoning_Layer", parcel_zoning_final)
-                arcpy.AddMessage("✓ Exported selected parcels to ParcelZoning_Final.")
-            else:
-                arcpy.AddError("No parcels found where Shape_Area >= MAX_Shape_Area. Please check your data.")
-                return
-            
-            ##############################################################################
-            # PART B: Process New Constructions
-            ##############################################################################
-            arcpy.AddMessage("=" * 60)
-            arcpy.AddMessage("PART B: Processing New Constructions")
-            arcpy.AddMessage("=" * 60)
-            
-            arcpy.AddMessage("Intersecting new detected constructions with ParcelZoning_Final...")
-            arcpy.analysis.Intersect(
-                in_features=[detected_constructions, parcel_zoning_final],
-                out_feature_class=new_constructions,
-                join_attributes="ALL"
-            )
-            arcpy.AddMessage("✓ Intersection of detected constructions completed.")
-            
-            arcpy.AddMessage("Calculating summary statistics for new constructions...")
-            arcpy.analysis.Statistics(
-                in_table=new_constructions,
-                out_table=summary_houses,
-                statistics_fields="Shape_Area MAX",
-                case_field="FID_Detected_Constructions"
-            )
-            arcpy.AddMessage("✓ Summary statistics for new constructions completed.")
-            
-            arcpy.AddMessage("Joining summary statistics with New_Constructions...")
-            arcpy.management.JoinField(
-                in_data=new_constructions,
-                in_field="FID_Detected_Constructions",
-                join_table=summary_houses,
-                join_field="FID_Detected_Constructions",
-                fields="MAX_Shape_Area"
-            )
-            arcpy.AddMessage("✓ Join operation for new constructions completed.")
-            
-            arcpy.AddMessage("Creating a feature layer for new constructions...")
-            arcpy.management.MakeFeatureLayer(new_constructions, "New_Constructions_layer")
-            
-            arcpy.AddMessage("Selecting new constructions where Shape_Area >= Max_Shape_Area_1...")
-            selection_query = "Shape_Area >= Max_Shape_Area_1"
-            arcpy.management.SelectLayerByAttribute("New_Constructions_layer", "NEW_SELECTION", selection_query)
-            selected_count = int(arcpy.management.GetCount("New_Constructions_layer")[0])
-            arcpy.AddMessage(f"✓ Selected {selected_count} features based on area criteria.")
-            
-            if selected_count == 0:
-                arcpy.AddWarning("No features selected with the condition. Verify the field names and attribute values.")
-                return
-            
-            arcpy.AddMessage(f"Exporting selected features to {final_output_name}...")
-            arcpy.conversion.ExportFeatures("New_Constructions_layer", final_output)
-            arcpy.AddMessage(f"✓ {final_output_name} exported successfully.")
-            
-            ##############################################################################
-            # PART C: Add and Calculate Fields
-            ##############################################################################
-            arcpy.AddMessage("=" * 60)
-            arcpy.AddMessage("PART C: Adding and Calculating Fields")
-            arcpy.AddMessage("=" * 60)
-            
-            arcpy.AddMessage(f"Adding fields legal_t, status_t, and year_t to {final_output_name}...")
-            fields_to_add = [
-                {"field_name": "status_t", "field_type": "TEXT", "field_length": 250, "field_alias": "Status"},
-                {"field_name": "year_t", "field_type": "LONG", "field_length": 10, "field_alias": "Year"},
-                {"field_name": "legal_t", "field_type": "TEXT", "field_length": 250, "field_alias": "Legality Status"},
-            ]
-            
-            for field in fields_to_add:
-                arcpy.management.AddField(
-                    in_table=final_output,
-                    field_name=field["field_name"],
-                    field_type=field["field_type"],
-                    field_precision="",
-                    field_scale="",
-                    field_length=field["field_length"],
-                    field_alias=field["field_alias"]
-                )
-                arcpy.AddMessage(f"✓ Field {field['field_name']} added successfully.")
-            
-            ##############################################################################
-            # PART D: Permanently Join All BPMIS Data
-            ##############################################################################
-            arcpy.AddMessage("=" * 60)
-            arcpy.AddMessage("PART D: Joining BPMIS Data")
-            arcpy.AddMessage("=" * 60)
-            
-            arcpy.AddMessage("Performing permanent join with BPMIS Data...")
-            bpmis_fields = [f.name for f in arcpy.ListFields(bpmis_data) 
-                            if f.type not in ('OID', 'Geometry') and f.name != 'Shape']
-            
-            if "Plot_No" not in bpmis_fields:
-                bpmis_fields.append("Plot_No")
-            
-            arcpy.management.JoinField(
-                in_data=final_output,
-                in_field="upi",
-                join_table=bpmis_data,
-                join_field="Plot_No",
-                fields=bpmis_fields
-            )
-            arcpy.AddMessage(f"✓ Permanent join with BPMIS Data completed. Joined fields: {', '.join(bpmis_fields)}")
-            
-            field_list = [f.name for f in arcpy.ListFields(final_output)]
-            if "Plot_No" not in field_list:
-                arcpy.AddWarning("Plot_No field not found in final output - join may have failed.")
-            else:
-                arcpy.AddMessage("✓ Plot_No field successfully included in output.")
-            
-            ##############################################################################
-            # PART E: Flag Houses as Legal/Illegal and Populate Fields
-            ##############################################################################
-            arcpy.AddMessage("=" * 60)
-            arcpy.AddMessage("PART E: Flagging Legal/Illegal Status and Populating Fields")
-            arcpy.AddMessage("=" * 60)
-            
-            arcpy.management.MakeFeatureLayer(final_output, "Final_Output_layer")
-            
-            # Flag houses as Illegal where Plot_No is NULL
-            arcpy.AddMessage("Marking houses as Illegal where Plot_No is NULL...")
-            where_clause_illegal = '"Plot_No" IS NULL'
-            arcpy.management.SelectLayerByAttribute("Final_Output_layer", "NEW_SELECTION", where_clause_illegal)
-            illegal_count = int(arcpy.management.GetCount("Final_Output_layer")[0])
-            if illegal_count > 0:
-                arcpy.management.CalculateField("Final_Output_layer", "legal_t", expression='"Illegal"', expression_type="PYTHON3")
-                arcpy.AddMessage(f"✓ {illegal_count} houses marked as Illegal.")
-            
-            # Flag houses as Legal where Plot_No is NOT NULL
-            arcpy.AddMessage("Marking houses as Legal where Plot_No is NOT NULL...")
-            where_clause_legal = '"Plot_No" IS NOT NULL'
-            arcpy.management.SelectLayerByAttribute("Final_Output_layer", "NEW_SELECTION", where_clause_legal)
-            legal_count = int(arcpy.management.GetCount("Final_Output_layer")[0])
-            if legal_count > 0:
-                arcpy.management.CalculateField("Final_Output_layer", "legal_t", expression='"Legal"', expression_type="PYTHON3")
-                arcpy.AddMessage(f"✓ {legal_count} houses marked as Legal.")
-            
-            # Clear selection and populate remaining fields
-            arcpy.management.SelectLayerByAttribute("Final_Output_layer", "CLEAR_SELECTION")
-            
-            arcpy.AddMessage(f"Populating year_t field with {analysis_year}...")
-            arcpy.management.CalculateField("Final_Output_layer", "year_t", expression=str(analysis_year), expression_type="PYTHON3")
-            arcpy.AddMessage("✓ Year field populated successfully.")
-            
-            arcpy.AddMessage("Calculating default status_t field value...")
-            arcpy.management.CalculateField("Final_Output_layer", "status_t", expression='"New House"', expression_type="PYTHON3")
-            arcpy.AddMessage("✓ Status field updated successfully.")
-            
-            # Final summary
-            total_count = int(arcpy.management.GetCount(final_output)[0])
-            arcpy.AddMessage("=" * 60)
-            arcpy.AddMessage("ANALYSIS COMPLETE!")
-            arcpy.AddMessage("=" * 60)
-            arcpy.AddMessage(f"Final Output: {final_output}")
-            arcpy.AddMessage(f"Total Constructions Analyzed: {total_count}")
-            arcpy.AddMessage(f"Legal Constructions: {legal_count}")
-            arcpy.AddMessage(f"Illegal Constructions: {illegal_count}")
-            arcpy.AddMessage(f"Analysis Year: {analysis_year}")
-            arcpy.AddMessage("=" * 60)
-            
-        except Exception as e:
-            arcpy.AddError(f"An error occurred during execution: {str(e)}")
-            raise e
+            if arcpy.Exists(dataset):
+                arcpy.management.Delete(dataset)
+        except:
+            pass
 
-
-class Toolbox:
-    """Define the toolbox (the name of the toolbox is the name of the .pyt file)."""
+def validate_inputs():
+    """Validate all input parameters"""
+    arcpy.AddMessage("Validating input parameters...")
     
-    def __init__(self):
-        self.label = "Construction Analysis Toolbox"
-        self.alias = "ConstructionAnalysis"
-        self.description = "Tools for analyzing construction legality and zoning compliance"
-        
-        # List of tool classes associated with this toolbox
-        self.tools = [ConstructionAnalysisTool]
+    if not arcpy.Exists(Parcels_Name):
+        arcpy.AddError(f"Input parcels layer does not exist: {Parcels_Name}")
+        return False
+    
+    if not arcpy.Exists(Zoning_Layer):
+        arcpy.AddError(f"Input zoning layer does not exist: {Zoning_Layer}")
+        return False
+    
+    if not arcpy.Exists(Detected_Constructions):
+        arcpy.AddError(f"Input detected constructions layer does not exist: {Detected_Constructions}")
+        return False
+    
+    if not arcpy.Exists(BPMIS_Data):
+        arcpy.AddError(f"Input BPMIS data does not exist: {BPMIS_Data}")
+        return False
+    
+    if not arcpy.Exists(Output_Geodatabase):
+        arcpy.AddError(f"Output geodatabase does not exist: {Output_Geodatabase}")
+        return False
+    
+    # Check if required fields exist
+    parcel_fields = [f.name.lower() for f in arcpy.ListFields(Parcels_Name)]
+    if 'upi' not in parcel_fields:
+        arcpy.AddError("'upi' field not found in parcels layer")
+        return False
+    
+    bpmis_fields = [f.name.lower() for f in arcpy.ListFields(BPMIS_Data)]
+    if 'plot_no' not in bpmis_fields:
+        arcpy.AddError("'Plot_No' field not found in BPMIS data")
+        return False
+    
+    arcpy.AddMessage("Input validation completed successfully.")
+    return True
+
+def get_dominant_area_features(input_layer, group_field, temp_stats_table):
+    """
+    Get features with dominant (maximum) area for each group
+    Returns the feature class with only dominant area features
+    """
+    arcpy.AddMessage(f"Calculating dominant areas for {input_layer}...")
+    
+    # Calculate statistics to find maximum area for each group
+    arcpy.analysis.Statistics(
+        in_table=input_layer,
+        out_table=temp_stats_table,
+        statistics_fields="Shape_Area MAX",
+        case_field=group_field
+    )
+    
+    # Join the statistics back to the original layer
+    arcpy.management.JoinField(
+        in_data=input_layer,
+        in_field=group_field,
+        join_table=temp_stats_table,
+        join_field=group_field,
+        fields="MAX_Shape_Area"
+    )
+    
+    # Create a feature layer and select features with maximum area
+    layer_name = f"{os.path.basename(input_layer)}_Layer"
+    arcpy.management.MakeFeatureLayer(input_layer, layer_name)
+    
+    # Select features where Shape_Area equals MAX_Shape_Area (dominant area)
+    where_clause = "Shape_Area >= MAX_Shape_Area"
+    arcpy.management.SelectLayerByAttribute(layer_name, "NEW_SELECTION", where_clause)
+    
+    selected_count = int(arcpy.management.GetCount(layer_name)[0])
+    arcpy.AddMessage(f"Selected {selected_count} features with dominant area.")
+    
+    if selected_count == 0:
+        arcpy.AddError(f"No features selected with dominant area criteria for {input_layer}")
+        return None, layer_name
+    
+    return selected_count, layer_name
+
+try:
+    # Validate inputs first
+    if not validate_inputs():
+        sys.exit("Input validation failed")
+    
+    arcpy.AddMessage(f"Starting construction analysis for acquisition date: {acquisition_date}")
+    
+    ##############################################################################
+    # PART A: Process Parcels & Zoning - Get Dominant Zoning per Parcel
+    ##############################################################################
+    arcpy.AddMessage("=" * 60)
+    arcpy.AddMessage("PART A: Processing Parcels and Zoning Intersection")
+    arcpy.AddMessage("=" * 60)
+    
+    # Intersect parcels with zoning
+    arcpy.AddMessage("Performing intersection between Parcels and Zoning...")
+    arcpy.analysis.Intersect(
+        in_features=[Parcels_Name, Zoning_Layer],
+        out_feature_class=ParcelZoning,
+        join_attributes="ALL",
+        cluster_tolerance="",
+        output_type="INPUT"
+    )
+    arcpy.AddMessage("Intersection completed successfully.")
+    
+    # Get features with dominant area (one zoning per parcel)
+    parcel_desc = arcpy.Describe(Parcels_Name)
+    parcel_oid_field = f"FID_{parcel_desc.baseName}" if parcel_desc.baseName else "FID_Parcels"
+    
+    selected_count, parcel_layer = get_dominant_area_features(
+        ParcelZoning, 
+        parcel_oid_field, 
+        Parcel_Zoning_Statistics
+    )
+    
+    if selected_count is None:
+        raise Exception("Failed to identify dominant zoning areas for parcels")
+    
+    # Export the dominant zoning parcels
+    arcpy.conversion.ExportFeatures(parcel_layer, ParcelZoning_Final)
+    arcpy.AddMessage(f"Exported {selected_count} parcels with dominant zoning to {ParcelZoning_Final}")
+    
+    ##############################################################################
+    # PART B: Process New Constructions - Get Dominant Parcel per Construction
+    ##############################################################################
+    arcpy.AddMessage("=" * 60)
+    arcpy.AddMessage("PART B: Processing New Constructions")
+    arcpy.AddMessage("=" * 60)
+    
+    # Intersect detected constructions with final parcel-zoning data
+    arcpy.AddMessage("Intersecting detected constructions with parcel-zoning data...")
+    arcpy.analysis.Intersect(
+        in_features=[Detected_Constructions, ParcelZoning_Final],
+        out_feature_class=New_Constructions,
+        join_attributes="ALL",
+        cluster_tolerance="",
+        output_type="INPUT"
+    )
+    arcpy.AddMessage("Construction-parcel intersection completed.")
+    
+    # Get constructions with dominant parcel area
+    construction_desc = arcpy.Describe(Detected_Constructions)
+    construction_oid_field = f"FID_{construction_desc.baseName}" if construction_desc.baseName else "FID_Detected_Constructions"
+    
+    selected_count, construction_layer = get_dominant_area_features(
+        New_Constructions,
+        construction_oid_field,
+        Construction_Statistics
+    )
+    
+    if selected_count is None:
+        raise Exception("Failed to identify dominant parcel areas for constructions")
+    
+    # Export the final constructions with dominant parcel assignment
+    arcpy.conversion.ExportFeatures(construction_layer, New_Houses)
+    arcpy.AddMessage(f"Exported {selected_count} constructions with dominant parcel assignment to {New_Houses}")
+    
+    ##############################################################################
+    # PART C: Add and Configure Fields
+    ##############################################################################
+    arcpy.AddMessage("=" * 60)
+    arcpy.AddMessage("PART C: Adding and Configuring Fields")
+    arcpy.AddMessage("=" * 60)
+    
+    # Define fields to add - keeping original field names
+    fields_to_add = [
+        {
+            "field_name": "status_t", 
+            "field_type": "TEXT", 
+            "field_length": 250, 
+            "field_alias": "Status",
+            "default_value": "New House"
+        },
+        {
+            "field_name": "year_t", 
+            "field_type": "TEXT", 
+            "field_length": 50, 
+            "field_alias": "Year",
+            "default_value": acquisition_date
+        },
+        {
+            "field_name": "legal_t", 
+            "field_type": "TEXT", 
+            "field_length": 250, 
+            "field_alias": "Legality Status",
+            "default_value": "Unknown"
+        }
+    ]
+    
+    # Add fields
+    for field in fields_to_add:
+        try:
+            arcpy.management.AddField(
+                in_table=New_Houses,
+                field_name=field["field_name"],
+                field_type=field["field_type"],
+                field_precision="",
+                field_scale="",
+                field_length=field.get("field_length", ""),
+                field_alias=field["field_alias"]
+            )
+            arcpy.AddMessage(f"Added field: {field['field_name']}")
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                arcpy.AddWarning(f"Field {field['field_name']} already exists, skipping...")
+            else:
+                raise e
+    
+    ##############################################################################
+    # PART D: Join with BPMIS Data
+    ##############################################################################
+    arcpy.AddMessage("=" * 60)
+    arcpy.AddMessage("PART D: Joining with BPMIS Data")
+    arcpy.AddMessage("=" * 60)
+    
+    # Get BPMIS fields (exclude system fields)
+    bpmis_fields = [f.name for f in arcpy.ListFields(BPMIS_Data) 
+                    if f.type not in ('OID', 'Geometry') and 
+                    f.name.lower() not in ('shape', 'shape_length', 'shape_area', 'objectid')]
+    
+    # Ensure Plot_No is in the join fields
+    if "Plot_No" not in bpmis_fields:
+        bpmis_fields.append("Plot_No")
+    
+    arcpy.AddMessage(f"Joining BPMIS fields: {', '.join(bpmis_fields)}")
+    
+    # Perform the join
+    arcpy.management.JoinField(
+        in_data=New_Houses,
+        in_field="upi",
+        join_table=BPMIS_Data,
+        join_field="Plot_No",
+        fields=bpmis_fields
+    )
+    arcpy.AddMessage("BPMIS data join completed.")
+    
+    ##############################################################################
+    # PART E: Calculate Legal Status and Populate Fields
+    ##############################################################################
+    arcpy.AddMessage("=" * 60)
+    arcpy.AddMessage("PART E: Calculating Legal Status and Populating Fields")
+    arcpy.AddMessage("=" * 60)
+    
+    # Create feature layer for calculations
+    arcpy.management.MakeFeatureLayer(New_Houses, "New_Houses_Layer")
+    
+    # Calculate legal status based on Plot_No availability
+    arcpy.AddMessage("Calculating legal status...")
+    
+    # Mark as Legal where Plot_No is NOT NULL
+    legal_where_clause = "Plot_No IS NOT NULL"
+    arcpy.management.SelectLayerByAttribute("New_Houses_Layer", "NEW_SELECTION", legal_where_clause)
+    legal_count = int(arcpy.management.GetCount("New_Houses_Layer")[0])
+    if legal_count > 0:
+        arcpy.management.CalculateField(
+            "New_Houses_Layer", 
+            "legal_t", 
+            "'Legal'", 
+            "PYTHON3"
+        )
+        arcpy.AddMessage(f"Marked {legal_count} constructions as Legal")
+    
+    # Mark as Illegal where Plot_No IS NULL
+    illegal_where_clause = "Plot_No IS NULL"
+    arcpy.management.SelectLayerByAttribute("New_Houses_Layer", "NEW_SELECTION", illegal_where_clause)
+    illegal_count = int(arcpy.management.GetCount("New_Houses_Layer")[0])
+    if illegal_count > 0:
+        arcpy.management.CalculateField(
+            "New_Houses_Layer", 
+            "legal_t", 
+            "'Illegal'", 
+            "PYTHON3"
+        )
+        arcpy.AddMessage(f"Marked {illegal_count} constructions as Illegal")
+    
+    # Clear selection and populate other fields
+    arcpy.management.SelectLayerByAttribute("New_Houses_Layer", "CLEAR_SELECTION")
+    
+    # Populate status field
+    arcpy.management.CalculateField(
+        "New_Houses_Layer", 
+        "status_t", 
+        "'New House'", 
+        "PYTHON3"
+    )
+    
+    # Populate year field with acquisition date
+    arcpy.management.CalculateField(
+        "New_Houses_Layer", 
+        "year_t", 
+        f"'{acquisition_date}'", 
+        "PYTHON3"
+    )
+    
+    ##############################################################################
+    # PART F: Final Summary and Cleanup
+    ##############################################################################
+    arcpy.AddMessage("=" * 60)
+    arcpy.AddMessage("PART F: Final Summary")
+    arcpy.AddMessage("=" * 60)
+    
+    # Get final counts
+    total_constructions = int(arcpy.management.GetCount(New_Houses)[0])
+    
+    arcpy.AddMessage(f"Analysis completed successfully!")
+    arcpy.AddMessage(f"Total constructions processed: {total_constructions}")
+    arcpy.AddMessage(f"Legal constructions: {legal_count}")
+    arcpy.AddMessage(f"Illegal constructions: {illegal_count}")
+    arcpy.AddMessage(f"Image acquisition date: {acquisition_date}")
+    arcpy.AddMessage(f"Analysis date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    arcpy.AddMessage(f"Output feature class: {New_Houses}")
+    
+    # Clean up temporary data
+    cleanup_temp_data()
+    arcpy.AddMessage("Temporary data cleaned up successfully.")
+    
+except Exception as e:
+    arcpy.AddError(f"An error occurred: {str(e)}")
+    # Clean up on error
+    cleanup_temp_data()
+    sys.exit(f"Script failed with error: {str(e)}")
+
+finally:
+    # Final cleanup attempt
+    try:
+        cleanup_temp_data()
+    except:
+        pass
