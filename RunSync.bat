@@ -3,10 +3,10 @@ title City of Kigali - Approval Sync
 color 0A
 echo.
 echo =====================================
-echo   🤖 CoK Inspection Hub SYNC AGENT
+echo    CoK Inspection Hub SYNC AGENT
 echo =====================================
 echo.
-echo 🚀 Initializing approval synchronization...
+echo  Initializing approval synchronization...
 echo.
 
 REM Set ArcGIS Python environment
@@ -18,6 +18,6 @@ REM Run with ArcGIS Python
 
 echo.
 echo =====================================
-echo 🎯 Sync Complete! Press any key to exit
+echo  Sync Complete! Press any key to exit
 echo =====================================
 pause >nul
