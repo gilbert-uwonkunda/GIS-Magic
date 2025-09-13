@@ -21,13 +21,13 @@ def update_bpmis_permits():
     TABLE_PATH = f"{GDB_PATH}\\BPMIS_Current"
     
     print("=" * 60)
-    print("🏗️  BPMIS PERMIT MANAGEMENT - FIXED VERSION")
+    print(" BPMIS PERMIT MANAGEMENT - FIXED VERSION")
     print("=" * 60)
-    print("✅ Target: BPMIS_Current table")
-    print("✅ Plot field: plot_no (lowercase)")
-    print("✅ Status field: approval_status")
-    print("✅ Date field: date_of_response")
-    print("✅ Statuses: Permitted → Approved, Canceled → Rejected")
+    print(" Target: BPMIS_Current table")
+    print("Plot field: plot_no (lowercase)")
+    print(" Status field: approval_status")
+    print(" Date field: date_of_response")
+    print(" Statuses: Permitted → Approved, Canceled → Rejected")
     print("=" * 60)
     
     try:
@@ -36,7 +36,7 @@ def update_bpmis_permits():
         df_api = fetch_api_data(API_BASE_URL, API_ENDPOINT_ID, API_KEY)
         
         if df_api is None or df_api.empty:
-            print("❌ No API data received!")
+            print(" No API data received!")
             return False
         
         # Step 2: Filter for target statuses
